@@ -2,14 +2,30 @@ package prod_error_2_github_issue
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"github.com/google/go-github/github"
 	"golang.org/x/oauth2"
-	"log"
 	"os"
 )
 
 type PubSubMessage struct {
 	Data []byte `json:"data"`
+}
+
+func Init() {
+	_, isFound := os.LookupEnv("github_token")
+	if isFound == false {
+		panic(errors.New("couldn't find a token"))
+	}
+	_, isFound = os.LookupEnv("github_user")
+	if isFound == false {
+		panic(errors.New("couldn't find a username"))
+	}
+	_, isFound = os.LookupEnv("github_repo")
+	if isFound == false {
+		panic(errors.New("couldn't find a repository name"))
+	}
 }
 
 func CreateGithubIssue(ctx context.Context, m PubSubMessage) {
@@ -18,14 +34,21 @@ func CreateGithubIssue(ctx context.Context, m PubSubMessage) {
 	)
 	tc := oauth2.NewClient(ctx, ts)
 	githubClient := github.NewClient(tc)
-	data := string(m.Data)
 
-	issueTitle := "Staging error"
-	if len(data) > 40 {
-		issueTitle = "Staging error: " + data[:40]
+	errorMessage := string(m.Data)
+
+	var issueTitle string
+	if len(errorMessage) < 20 {
+		issueTitle = "Production error"
+	} else {
+		issueTitle = fmt.Sprintf("%s: %s...", issueTitle, errorMessage[:20])
 	}
-	issueBody := data
+	issueBody := errorMessage
+
 	newIssue := github.IssueRequest{Title: &issueTitle, Body: &issueBody}
 	_, _, err := githubClient.Issues.Create(ctx, os.Getenv("github_user"), os.Getenv("github_repo"), &newIssue)
-	log.Println(err)
+
+	if err != nil {
+		panic(err)
+	}
 }
