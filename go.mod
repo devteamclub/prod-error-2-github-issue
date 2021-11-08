@@ -1,4 +1,4 @@
-module prod_error_2_github_issue
+module github.com/devteamclub/prod_error_2_github_issue
 
 go 1.16
 
