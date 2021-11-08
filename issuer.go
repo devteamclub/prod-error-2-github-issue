@@ -3,9 +3,9 @@ package prod_error_2_github_issue
 import (
 	"context"
 	"errors"
-	"fmt"
 	"github.com/google/go-github/github"
 	"golang.org/x/oauth2"
+	"log"
 	"os"
 )
 
@@ -13,7 +13,7 @@ type PubSubMessage struct {
 	Data []byte `json:"data"`
 }
 
-func Init() {
+func init() {
 	_, isFound := os.LookupEnv("github_token")
 	if isFound == false {
 		panic(errors.New("couldn't find a token"))
@@ -28,7 +28,7 @@ func Init() {
 	}
 }
 
-func CreateGithubIssue(ctx context.Context, m PubSubMessage) {
+func CreateGithubIssue(ctx context.Context, m PubSubMessage) error {
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: os.Getenv("github_token")},
 	)
@@ -37,18 +37,14 @@ func CreateGithubIssue(ctx context.Context, m PubSubMessage) {
 
 	errorMessage := string(m.Data)
 
-	var issueTitle string
-	if len(errorMessage) < 20 {
-		issueTitle = "Production error"
-	} else {
-		issueTitle = fmt.Sprintf("%s: %s...", issueTitle, errorMessage[:20])
-	}
+	issueTitle := "Production error"
 	issueBody := errorMessage
 
 	newIssue := github.IssueRequest{Title: &issueTitle, Body: &issueBody}
 	_, _, err := githubClient.Issues.Create(ctx, os.Getenv("github_user"), os.Getenv("github_repo"), &newIssue)
 
 	if err != nil {
-		panic(err)
+		log.Fatalln(err)
 	}
+	return err
 }
