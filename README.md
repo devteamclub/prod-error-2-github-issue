@@ -1,4 +1,4 @@
-# prod-error-2-github-issue+
+# prod-error-2-github-issue
 
 This repo contains code that can be deployed as Google Cloud Function. 
 It receives cloud run critical errors via PubSub 
