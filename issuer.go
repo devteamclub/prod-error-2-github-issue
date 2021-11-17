@@ -91,15 +91,23 @@ func parseErrorMessage(m PubSubMessage) (error, *github.Issue) {
 	var issueTitle string
 	var issueBody string
 	var newError ProductionError
-	var issue github.Issue
 	err := json.Unmarshal(m.Data, &newError)
 	if err == nil {
 		issueTitle = fmt.Sprintf("Prod err: %s", newError.JsonPayload.Error)
-		issueBody = fmt.Sprintf("## Stack:\n```%s```\n## Locals:\n```%s```", newError.JsonPayload.Stack, newError.JsonPayload.Locals)
+		beautifiedLocals, err := json.MarshalIndent(newError.JsonPayload.Locals, "", " ")
+		if err == nil {
+			issueBody = fmt.Sprintf("## Stack:\n```%s```\n## Locals:\n```%s\n```",
+				newError.JsonPayload.Stack, string(beautifiedLocals))
+		} else {
+			issueBody = fmt.Sprintf("## Stack:\n```%s```\n## Locals:\n(Couldn't jsonify properly...)\n```%s\n```",
+				newError.JsonPayload.Stack, newError.JsonPayload.Locals)
+		}
 	} else {
 		issueTitle = "Production error"
 		issueBody = string(m.Data)
 	}
+
+	var issue github.Issue
 	issue.Title = &issueTitle
 	issue.Body = &issueBody
 	return err, &issue
