@@ -7,6 +7,16 @@ ___
 ## Requirements
 Environment variables:
 
-GITHUB_USER=name of user or organization that contains proper repository<br>
-GITHUB_REPO=repository name<br>
+GITHUB_OWNER=name of user or organization that contains proper repository<br>
 GITHUB_TOKEN=Github token of user with privileges to create issues in the repository <br>
+GITHUB_SERVICES=```[
+                  {
+                    "serviceName": "your gcloud service name",
+                    "repo": "your repository name for issues"
+                  }, 
+                  {
+                    "serviceName": "your gcloud service name",
+                    "repo": "your repository name for issues"
+                  }
+                ]```<br>
+ENV_TYPE=type of your environment (dev, prod, staging)

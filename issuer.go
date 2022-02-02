@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/google/go-github/github"
 	"golang.org/x/oauth2"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 type PubSubMessage struct {
 	Data []byte `json:"data"`
 }
+
 type ProductionError struct {
 	InsertId    string `json:"insertId"`
 	JsonPayload struct {
@@ -39,106 +41,152 @@ type ProductionError struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+type Service struct {
+	ServiceName string `json:"serviceName"`
+	Repo        string `json:"repo"`
+}
+
+type Issuer struct {
+	GithubClient   *github.Client
+	GithubIssue    *github.Issue
+	GithubOwner    string
+	ProdError      ProductionError
+	ServiceList    []Service
+	ActualRepo     string
+	ProductionType string
+}
+
 func init() {
 	_, isFound := os.LookupEnv("GITHUB_TOKEN")
 	if isFound == false {
-		panic(errors.New("couldn't find a token"))
+		log.Fatalln(errors.New("couldn't find a token"))
 	}
-	_, isFound = os.LookupEnv("GITHUB_USER")
+	_, isFound = os.LookupEnv("GITHUB_OWNER")
 	if isFound == false {
-		panic(errors.New("couldn't find a username"))
+		log.Fatalln(errors.New("couldn't find owner"))
 	}
-	_, isFound = os.LookupEnv("GITHUB_REPO")
-	if isFound == false {
-		panic(errors.New("couldn't find a repository name"))
+
+	reposList := make([]Service, 0)
+	err := json.Unmarshal([]byte(os.Getenv("GITHUB_SERVICES")), &reposList)
+	if err != nil || len(reposList) == 0 {
+		log.Fatalln(errors.New("could not parse GITHUB_SERVICES or count of services = 0. Check provided value"))
 	}
 }
 
 func CreateGithubIssue(ctx context.Context, m PubSubMessage) error {
-	client := initGithubClient(ctx)
-	err, issue := parseErrorMessage(m)
-
-	var existingIssue *github.Issue
-	if err == nil {
-		existingIssue = checkIssueExists(ctx, *client, *issue.Title)
+	issuer := Issuer{}
+	issuer.initGithubClient(ctx)
+	issuer.buildIssueFromErrorMessage(m)
+	ok := issuer.findActualRepo()
+	if !ok {
+		log.Fatalln(`issuerError: Possible reasons:  
+						- Repository was not found. Please check map, contains repos names
+						- Couldn't parse PubSub message successfully'`)
 	}
 
-	if existingIssue != nil {
-		err := updateIssue(ctx, *client, existingIssue)
-		if err != nil {
-			panic(err)
-		}
+	existingIssue, err := issuer.getExistingIssue(ctx)
+	if err != nil {
 		return err
 	}
-
-	err = publishIssue(ctx, *client, issue)
-	if err != nil {
-		panic(err)
+	if existingIssue != nil {
+		return issuer.updateExistingIssue(ctx, existingIssue)
 	}
-	return nil
+
+	return issuer.publishNewIssue(ctx)
 }
 
-func initGithubClient(ctx context.Context) *github.Client {
-	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: os.Getenv("GITHUB_TOKEN")},
-	)
-	tc := oauth2.NewClient(ctx, ts)
-	githubClient := github.NewClient(tc)
-	return githubClient
+func (i *Issuer) initGithubClient(ctx context.Context) {
+	tc := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: os.Getenv("GITHUB_TOKEN")}))
+	i.GithubClient = github.NewClient(tc)
+	i.GithubOwner = os.Getenv("GITHUB_OWNER")
+	i.ProductionType = os.Getenv("ENV_TYPE")
+	i.ServiceList = make([]Service, 0)
+	err := json.Unmarshal([]byte(os.Getenv("GITHUB_SERVICES")), &i.ServiceList)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	//Check for correct GITHUB_OWNER and GITHUB_TOKEN
+	_, _, err = i.GithubClient.Repositories.List(ctx, i.GithubOwner, nil)
+	if err != nil {
+		log.Fatalln(err)
+	}
 }
 
-func parseErrorMessage(m PubSubMessage) (error, *github.Issue) {
+func (i *Issuer) buildIssueFromErrorMessage(m PubSubMessage) {
 	var issueTitle string
 	var issueBody string
 	var newError ProductionError
-	var issue github.Issue
 	err := json.Unmarshal(m.Data, &newError)
 	if err == nil {
-		issueTitle = fmt.Sprintf("Prod err: %s", newError.JsonPayload.Error)
-		issueBody = fmt.Sprintf("## Stack:\n```%s```\n## Locals:\n```%s```", newError.JsonPayload.Stack, newError.JsonPayload.Locals)
+		issueTitle = fmt.Sprintf("%s err: %s", i.ProductionType, newError.JsonPayload.Error)
+		beautifiedLocals, err := json.MarshalIndent(newError.JsonPayload.Locals, "", " ")
+		if err == nil {
+			issueBody = fmt.Sprintf("## Stack:\n```%s```\n## Locals:\n```%s\n```",
+				newError.JsonPayload.Stack, string(beautifiedLocals))
+		} else {
+			issueBody = fmt.Sprintf("## Stack:\n```%s```\n## Locals:\n(Couldn't jsonify properly...)\n```%s\n```",
+				newError.JsonPayload.Stack, newError.JsonPayload.Locals)
+		}
 	} else {
 		issueTitle = "Production error"
 		issueBody = string(m.Data)
 	}
-	issue.Title = &issueTitle
-	issue.Body = &issueBody
-	return err, &issue
+
+	i.ProdError = newError
+	i.GithubIssue = &github.Issue{Title: &issueTitle, Body: &issueBody}
 }
 
-func checkIssueExists(ctx context.Context, client github.Client, issueTitle string) *github.Issue {
-	issues, _, err := client.Issues.ListByRepo(ctx, os.Getenv("GITHUB_USER"), os.Getenv("GITHUB_REPO"), nil)
-	if err != nil {
-		return nil
-	}
-
-	re, _ := regexp.Compile(fmt.Sprintf(`%s \(\d*\)`, issueTitle))
-	for _, issue := range issues {
-		if re.MatchString(*issue.Title) {
-			return issue
+func (i *Issuer) findActualRepo() bool {
+	for _, s := range i.ServiceList {
+		if s.ServiceName == i.ProdError.Resource.Labels.ServiceName {
+			i.ActualRepo = s.Repo
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
-func updateIssue(ctx context.Context, client github.Client, issue *github.Issue) error {
-	newTitle, err := incrementCounter(*issue.Title)
+func (i *Issuer) getExistingIssue(ctx context.Context) (*github.Issue, error) {
+	issues, _, err := i.GithubClient.Issues.ListByRepo(ctx, i.GithubOwner, i.ActualRepo, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(issues) == 0 {
+		return nil, nil
+	}
+
+	re, _ := regexp.Compile(fmt.Sprintf(`%s \(\d*\)$`, *i.GithubIssue.Title))
+	for _, issue := range issues {
+		if re.MatchString(*issue.Title) {
+			return issue, nil
+		}
+	}
+	return nil, err
+}
+
+func (i *Issuer) updateExistingIssue(ctx context.Context, existingIssue *github.Issue) error {
+	newTitle, err := incrementCounter(*existingIssue.Title)
 	if err != nil {
 		return err
 	}
 
-	_, _, err = client.Issues.Edit(ctx, os.Getenv("GITHUB_USER"),
-		os.Getenv("GITHUB_REPO"), *issue.Number, &github.IssueRequest{Title: &newTitle, Body: issue.Body})
-	if err != nil {
-		return err
-	}
-	return nil
+	_, _, err = i.GithubClient.Issues.Edit(ctx, i.GithubOwner, i.ActualRepo, *existingIssue.Number,
+		&github.IssueRequest{
+			Title: &newTitle,
+			Body:  existingIssue.Body,
+		})
+	return err
 }
 
-func publishIssue(ctx context.Context, client github.Client, issue *github.Issue) error {
+func (i *Issuer) publishNewIssue(ctx context.Context) error {
 	// add error counter to the title
-	*issue.Title = *issue.Title + ` (1)`
-	newIssue := github.IssueRequest{Title: issue.Title, Body: issue.Body}
-	_, _, err := client.Issues.Create(ctx, os.Getenv("GITHUB_USER"), os.Getenv("GITHUB_REPO"), &newIssue)
+	*i.GithubIssue.Title = *i.GithubIssue.Title + ` (1)`
+	newIssue := github.IssueRequest{
+		Title: i.GithubIssue.Title,
+		Body:  i.GithubIssue.Body,
+	}
+	_, _, err := i.GithubClient.Issues.Create(ctx, i.GithubOwner, i.ActualRepo, &newIssue)
 	return err
 }
 
@@ -149,6 +197,7 @@ func incrementCounter(t string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	counter = counter + 1
 	newTitle := t[:res[0]] + "(" + strconv.Itoa(counter) + ")"
 	return newTitle, nil
